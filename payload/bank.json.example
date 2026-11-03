@@ -1,0 +1,29 @@
+{
+  "builtAt": "2026-01-01T00:00:00.000Z",
+  "source": "示例文件：把你的题库按这个结构写进 bank.json 就会优先查表",
+  "count": 2,
+  "items": [
+    {
+      "q": "示例题一：结售汇业务授权原则上多久一定？",
+      "options": [
+        { "letter": "A", "text": "每季度一次" },
+        { "letter": "B", "text": "每半年一次" },
+        { "letter": "C", "text": "每年一次" },
+        { "letter": "D", "text": "每两年一次" }
+      ],
+      "answer": "C",
+      "source": "示例分类"
+    },
+    {
+      "q": "示例题二：以下哪个方法用于向数组末尾添加元素？",
+      "options": [
+        { "letter": "A", "text": "push()" },
+        { "letter": "B", "text": "pop()" },
+        { "letter": "C", "text": "shift()" },
+        { "letter": "D", "text": "unshift()" }
+      ],
+      "answer": "A",
+      "source": "示例分类"
+    }
+  ]
+}
