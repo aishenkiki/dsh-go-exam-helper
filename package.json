@@ -1,0 +1,73 @@
+{
+  "name": "dsh-go-exam-helper",
+  "version": "1.0.0",
+  "description": "DSH Go 答题助手：盯住考试页面，把答案弹在顶部通知里。题库可选，图形题走视觉。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh-go",
+    "exam",
+    "ocr",
+    "notification"
+  ],
+  "license": "MIT",
+  "author": "aishenkiki",
+  "homepage": "https://github.com/aishenkiki/dsh-go-exam-helper",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aishenkiki/dsh-go-exam-helper.git"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "files": [
+    "lib",
+    "payload",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "dsh": ">=0.2.1-rc.2 <0.3.0-0"
+  },
+  "dshGo": {
+    "v": 1,
+    "title": {
+      "zh": "答题助手",
+      "en": "Exam helper"
+    },
+    "icon": "book",
+    "contributes": {
+      "panels": [
+        {
+          "id": "exam",
+          "title": {
+            "zh": "答题助手",
+            "en": "Exam helper"
+          },
+          "icon": "chart",
+          "placement": [
+            "session.tab",
+            "features"
+          ]
+        }
+      ],
+      "composer.strip": [
+        {
+          "id": "exam-status",
+          "icon": "book",
+          "text": {
+            "zh": "答题助手 · 未开始",
+            "en": "Exam · idle"
+          },
+          "panel": "exam"
+        }
+      ]
+    }
+  }
+}
