@@ -45,21 +45,25 @@ export function createAnswerer ({ token, cacheFile, log = () => {} }) {
     }, 500)
   }
 
-  async function ask (question, opts, strict, multi) {
+  async function callModel (content, maxTokens = 24) {
     const r = await fetch('https://api.deepseek.com/chat/completions', {
       method: 'POST',
       headers: { 'x-dsh-auth-token': token, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: 'deepseek-chat',
         temperature: 0,
-        max_tokens: 24,
-        messages: [{ role: 'user', content: PROMPT(question, opts, strict, multi) }],
+        max_tokens: maxTokens,
+        messages: [{ role: 'user', content }],
       }),
       signal: AbortSignal.timeout(20000),
     })
     if (!r.ok) throw new Error('model HTTP ' + r.status)
     const j = await r.json()
-    const text = (j.choices?.[0]?.message?.content || '').trim()
+    return (j.choices?.[0]?.message?.content || '').trim()
+  }
+
+  async function ask (question, opts, strict, multi) {
+    const text = await callModel(PROMPT(question, opts, strict, multi))
     const letters = pickLetters(text, multi)
     if (!letters) return null
     return { letter: letters, confidence: CONF(text) }
@@ -68,7 +72,7 @@ export function createAnswerer ({ token, cacheFile, log = () => {} }) {
   const valid = (letters, opts) => Boolean(letters) &&
     letters.split('').every((ch) => opts.some((o) => o.letter === ch))
 
-  return async function answer (sig, question, opts, multi = false) {
+  const answer = async function answer (sig, question, opts, multi = false) {
     const hit = cache[sig]
     if (hit && valid(hit.letter, opts)) {
       log('缓存', hit.letter)
@@ -81,6 +85,24 @@ export function createAnswerer ({ token, cacheFile, log = () => {} }) {
       save()
       return got
     }
-    return null
+        return null
   }
+
+  // 题库命中了，但答案文字在屏幕选项里找不到完全一致的项（考试端改了措辞）。
+  // 这时不要整题退化成"重新作答"，而是让模型只做一件事：在现有选项里挑与标准答案同义的那一项。
+  answer.pick = async function pick (sig, question, opts, target) {
+    const key = sig + ':pick'
+    const hit = cache[key]
+    if (hit && valid(hit.letter, opts)) return hit.letter
+    const text = await callModel(
+      `题库里这道题的标准答案是「${target}」。下面选项的措辞可能和题库不完全一样，请选出与它意思相同的**一项**。` +
+      `只输出一个字母（A/B/C/D/E/F），不要解释。\n\n题目：${question}\n${fmtOpts(opts)}`, 8)
+    const letter = pickLetters(text, false)
+    if (!valid(letter, opts)) return null
+    cache[key] = { letter, confidence: 'high', question: question.slice(0, 80), at: Date.now() }
+    save()
+    return letter
+  }
+
+  return answer
 }
