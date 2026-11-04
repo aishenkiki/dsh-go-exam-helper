@@ -4,7 +4,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 const BANK_FILE = 'bank.json'
-const FUZZY_MIN = 0.85   // 字符级相似度（Levenshtein）阈值：比 bigram 宽容，能容 1–2 个 OCR 错字
+const FUZZY_MIN = 0.85
+const MARGIN_MIN = 0.02   // 与次优候选的最小差距：差得少就说明分不开，宁可放弃
 const OPTION_AGREE_MIN = 0.75
 const GRAM_PREFILTER = 0.55 // bigram 粗筛，低于它就跳过昂贵的编辑距离
 
@@ -105,6 +106,9 @@ export class Bank {
       // 先用长度与 bigram 粗筛，跳过明显不同的题，省掉编辑距离的开销
       if (Math.abs(row.qn.length - qn.length) > Math.max(8, qn.length * 0.4)) continue
       if (jaccard(grams, row.grams) < GRAM_PREFILTER) continue
+      // 同一份文件里常有「…管理办法中，承租人是指?」和「…出租人是指?」这种一字之差的题，
+      // 光看题干会判成并列候选而放弃。先用选项对位筛一遍，能唯一确定就不该放弃。
+      if (!this.optionsAgree(row.item, options)) continue
       const score = levenshteinRatio(qn, row.qn)
       if (!best || score > best.score) {
         second = best ? best.score : 0
@@ -112,8 +116,10 @@ export class Bank {
       } else if (score > second) second = score
     }
     if (!best || best.score < FUZZY_MIN) return null
-    if (second >= FUZZY_MIN) return null // 有并列候选，不敢猜
-    if (!this.optionsAgree(best.row.item, options)) return null
+    // 选项都对得上、题面又几乎一样时（同一办法里的「承租人是指?」和「出租人是指?」），
+    // 只要最优解领先得足够明显就采用它；分不开才放弃。
+    const margin = best.score - second
+    if (second >= FUZZY_MIN && margin < MARGIN_MIN) return null
     return hit(best.row.item, 'fuzzy', Number(best.score.toFixed(3)))
   }
 
@@ -136,16 +142,27 @@ function hit(item, match, similarity) {
 }
 
 let cached = null
+let cachedMtime = 0
 
-/** 从目录里读 bank.json（没有就返回 null） */
+/** 从目录里读 bank.json（没有就返回 null）。
+ *  文件被换掉（mtime 变化）会自动重新加载，不用重启 watcher。 */
 export function loadBank(dir) {
-  if (cached) return cached
   const file = path.join(dir, BANK_FILE)
+  let mtime = 0
+  try {
+    mtime = fs.statSync(file).mtimeMs
+  } catch {
+    cached = null
+    cachedMtime = 0
+    return null
+  }
+  if (cached && mtime === cachedMtime) return cached
   try {
     const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
     cached = new Bank(raw)
+    cachedMtime = mtime
     return cached
   } catch {
-    return null
+    return cached
   }
 }
