@@ -28,7 +28,10 @@ export function connect () {
       resolve(api)
     })
     sock.on('error', reject)
-    sock.on('close', () => { for (const p of pending.values()) p.reject(new Error('closed')) })
+    sock.on('close', () => {
+      for (const p of pending.values()) p.reject(new Error('closed'))
+      pending.clear()
+    })
     sock.on('data', (chunk) => {
       buf += chunk
       let i
@@ -42,10 +45,26 @@ export function connect () {
         if (p) { pending.delete(msg.id); msg.error ? p.reject(new Error(msg.error.message)) : p.resolve(msg.result) }
       }
     })
-    const call = (method, params) => new Promise((res, rej) => {
+    // 每次调用都有超时：桥接半死时不让整轮循环卡住；超时同时把 pending 清掉，避免长跑内存缓慢增长。
+    const TIMEOUT = 12000
+    const call = (method, params, timeout = TIMEOUT) => new Promise((res, rej) => {
+      if (sock.destroyed) { rej(new Error('closed')); return }
       const id = nextId++
-      pending.set(id, { resolve: res, reject: rej })
-      sock.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n')
+      const timer = setTimeout(() => {
+        if (pending.delete(id)) rej(new Error(method + ' 超时'))
+      }, timeout)
+      if (typeof timer.unref === 'function') timer.unref()
+      pending.set(id, {
+        resolve: (v) => { clearTimeout(timer); res(v) },
+        reject: (e) => { clearTimeout(timer); rej(e) },
+      })
+      try {
+        sock.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n')
+      } catch (e) {
+        clearTimeout(timer)
+        pending.delete(id)
+        rej(e)
+      }
     })
     const api = {
       socket: sock,
