@@ -22,7 +22,7 @@ const DIR = path.dirname(fileURLToPath(import.meta.url))
 const LOCK = DIR + '/watcher.pid'
 const LOG = DIR + '/watch.log'
 const MIN_STABLE = 2
-const bank = loadBank(DIR) // 有 bank.json 就先查表，命中就直接用官方答案
+let bank = loadBank(DIR) // 有 bank.json 就先查表；文件换了会自动重载
 
 // 题库里的答案字母对应题库自己的选项顺序；App 上的选项顺序可能不同，必须按文字重新对位。
 // 对不上就说明这条题库记录和屏幕上的题不是同一版，宁可放弃也不能弹错。
@@ -36,13 +36,18 @@ function bankLetter (hit, opts) {
   return null
 }
 
-function tryBank (question, opts) {
+async function tryBank (question, opts, key) {
+  bank = loadBank(DIR) // 每拍 stat 一次，题库导入后立刻生效
   if (!bank || !question) return null
   const hit = bank.lookup(question, opts)
   if (!hit) return null
   const letter = bankLetter(hit, opts)
-  if (!letter) return null
-  return { ...hit, answer: letter }
+  if (letter) return { ...hit, answer: letter }
+  // 屏幕上找不到与题库答案完全相同的措辞（考试端改写了选项文字）：
+  // 让模型只做"把标准答案对到某一项"这一件事，比让它重新答一遍更可靠。
+  const mapped = await answer.pick(key || signature(question, opts), question, opts, hit.text)
+  if (!mapped) return null
+  return { ...hit, answer: mapped, match: hit.match + '+对位' }
 }
 
 const LOG_MAX = 2 * 1024 * 1024
@@ -98,13 +103,30 @@ function logErr (msg) {
 
 rotateIfNeeded()
 
+// pid 会被系统复用：只有命令行里确实有 watch.mjs 才算是我们的旧实例。
+function isWatcherPid (pid) {
+  try {
+    process.kill(pid, 0)
+  } catch (e) {
+    if (e.code !== 'EPERM') return false
+  }
+  try {
+    const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ')
+    return /watch\.mjs/.test(cmd)
+  } catch {
+    return true // 读不到 /proc 时保守当成活着的
+  }
+}
+
 function takeLock () {
   try {
     const pid = Number(fs.readFileSync(LOCK, 'utf8'))
     if (pid && pid !== process.pid) {
-      process.kill(pid, 0)          // 还活着就退出，保证只有一份
-      console.error('已有实例在跑：' + pid)
-      process.exit(0)
+      const alive = isWatcherPid(pid)
+      if (alive) {
+        console.error('已有实例在跑：' + pid)
+        process.exit(0)
+      }
     }
   } catch {}
   fs.writeFileSync(LOCK, String(process.pid))
@@ -116,13 +138,37 @@ function releaseLock () {
   } catch {}
 }
 
-const withTimeout = (p, ms, what) => Promise.race([
-  p,
-  new Promise((_, rej) => setTimeout(() => rej(new Error(what + ' 超时')), ms)),
-])
+function withTimeout (p, ms, what) {
+  let timer
+  const guard = new Promise((_, rej) => {
+    timer = setTimeout(() => rej(new Error(what + ' 超时')), ms)
+    if (typeof timer.unref === 'function') timer.unref()
+  })
+  return Promise.race([p, guard]).finally(() => clearTimeout(timer))
+}
 
-const creds = fs.readFileSync('/root/.dsh/.credentials.yaml', 'utf8')
-const token = creds.match(/deepseek-account-platform\/default:[\s\S]*?token: (\S+)/)[1]
+// 凭据：优先用环境变量，其次读 DSH 的凭据文件。换设备/没登录时不能直接崩掉。
+function readToken () {
+  if (process.env.DSH_TOKEN) return process.env.DSH_TOKEN
+  const candidates = [
+    path.join(os.homedir(), '.dsh', '.credentials.yaml'),
+    '/root/.dsh/.credentials.yaml',
+  ]
+  for (const f of candidates) {
+    try {
+      const text = fs.readFileSync(f, 'utf8')
+      const m = text.match(/deepseek-account-platform\/default:[\s\S]*?token:\s*(\S+)/)
+      if (m) return m[1]
+    } catch {}
+  }
+  return null
+}
+const token = readToken()
+if (!token) {
+  log('没有可用的模型凭据：请在 DSH 设置 → 模型里登录，或设置环境变量 DSH_TOKEN')
+  console.error('没有可用的模型凭据')
+  process.exit(2)
+}
 
 takeLock()
 process.on('exit', releaseLock)
@@ -132,7 +178,7 @@ process.on('SIGINT', () => { releaseLock(); process.exit(0) })
 const answer = createAnswerer({ token, cacheFile: DIR + '/answers.json', log })
 
 // done: 已答题 → 最后一次弹通知的时间（毫秒）
-const state = { examSeen: false, sig: '', stable: 0, screen: null, attempts: new Map(), lastRejected: '', lastApp: '', lastAt: 0, ocrProg: 0, shownSig: '' }
+const state = { examSeen: false, sig: '', stable: 0, screen: null, attempts: new Map(), lastRejected: '', lastApp: '', lastAt: 0, ocrProg: 0, shownSig: '', faultNotified: false, faultTimes: [] }
 
 async function shoot (p) {
   const r = await withTimeout(p.callTool('screen', { image: true }), 8000, '截图')
@@ -143,10 +189,43 @@ async function shoot (p) {
   return file
 }
 
+
+// 读屏被掐断的状态：只在开始时提醒一次，别刷屏
+function noteReadFault (why) {
+  const first = !state.fault
+  state.fault = true
+  if (first) log('读屏被系统停止', String(why || '').slice(0, 40))
+  // 同一次中断只提醒一次；恢复后再次中断才会重新计数（以前每 120 秒重发，通知栏会攒一堆一样的）
+  if (state.faultNotified) return
+  const now = Date.now()
+  state.faultTimes = (state.faultTimes || []).filter((t) => now - t < 3600_000)
+  if (state.faultTimes.length >= 3) return // 一小时最多 3 条，剩下的只写日志
+  state.faultNotified = true
+  state.faultTimes.push(now)
+  state.faultAt = now
+  if (pc) pc.callTool('notify', { title: '答题助手：读屏停了', text: '打开 设置→手机操控 关一下再打开（或对我说一句“读一下屏幕”），再回考试页' }).catch(() => {})
+}
+
+function clearReadFault () {
+  if (!state.fault) return
+  state.fault = false
+  state.faultAt = 0
+  state.faultNotified = false // 下次中断可以再提醒一次
+  log('读屏恢复')
+}
+
 async function tick (p) {
   const t0 = Date.now()
+  state.ocrProg = 0
   const r = await withTimeout(p.callTool('screen', {}), 6000, '读屏')
   const dump = r.text || ''
+  // 手机操控会话被系统断掉（息屏、切后台、用户点了停）时，桥接返回 isError 而不是抛错，
+  // 这时候要明确告诉用户，否则看起来就是"不动了"。
+  if ((r.raw && r.raw.isError) || /已停止本次手机操作|屏幕关闭|没有权限|not allowed/i.test(dump)) {
+    noteReadFault(dump)
+    return
+  }
+  clearReadFault()
   if (!dump || /DSH 自己的界面/.test(dump) || /· DSH Go ·/.test(dump)) { state.sig = ''; state.stable = 0; return }
 
   let screen = parseScreen(dump)
@@ -206,6 +285,9 @@ async function tick (p) {
   let opts = screen.opts
   let letter = null
   let conf = 'high'
+  let ocrMs = 0        // 慢路各阶段耗时，写进日志用
+  let tVision = 0
+  let tOcr = 0
   let fromBank = null                     // 命中题库时记下来，标题加 📚、正文标「题库：」
 
   const cKey = createHash('sha1')
@@ -214,7 +296,7 @@ async function tick (p) {
 
   // 第 0 步：题库查表（官方答案，比模型准，也不花钱）
   if (question) {
-    fromBank = tryBank(question, opts)
+    fromBank = await tryBank(question, opts, cKey)
     if (fromBank) {
       letter = fromBank.answer
       conf = 'high'
@@ -239,13 +321,15 @@ async function tick (p) {
     // 先本地 OCR 一次（约 0.8 秒）拿题干查题库：命中就不用调视觉模型，省约 1 秒和一次调用费。
     // 查表本身还有相似度阈值和选项对位把关，OCR 认错字最多导致不命中，不会导致弹错。
     state.ocrProg = 0 // 每拍重算，别把上一题的题号带到这一题
+    tOcr = Date.now()
     const quick = await analyzeFast(shot, screen.opts)
+    ocrMs = Date.now() - tOcr
     if (quick && quick.prog) state.ocrProg = quick.prog.current
     if (quick && quick.ok) {
       const qOpts = screen.opts.length >= 3 ? screen.opts : quick.options
-      fromBank = tryBank(quick.question, qOpts)
+      fromBank = await tryBank(quick.question, qOpts, cKey)
       // 长题干只取后 3 行，开头常被丢掉：用多收两行的备选再查一次
-      if (!fromBank && quick.questionAlt) fromBank = tryBank(quick.questionAlt, qOpts)
+      if (!fromBank && quick.questionAlt) fromBank = await tryBank(quick.questionAlt, qOpts, cKey)
       if (fromBank) {
         opts = qOpts
         letter = fromBank.answer
@@ -253,26 +337,12 @@ async function tick (p) {
         log('题库-fast', fromBank.match, letter, quick.question.slice(0, 24))
       }
     }
-    // 单次 OCR 没命中（认错字/版面抖动）：换多候选 OCR 再试一次，仍不中才走视觉模型
-    if (!letter) {
-      const multi = await analyze(shot, screen.opts)
-      if (multi && !multi.weak && multi.question) {
-        const wOpts = screen.opts.length >= 3 ? screen.opts : multi.options
-        fromBank = tryBank(multi.question, wOpts)
-        if (fromBank) {
-          opts = wOpts
-          letter = fromBank.answer
-          conf = 'high'
-          log('题库-多候选', fromBank.match, letter, multi.question.slice(0, 24))
-        }
-      }
-    }
-
     // 图形题：题干和选项都不是文字（或要描述图形），普通"抄题干"提示词只会返回空，得走专用提示词
     const noText = !question || !looksLikeQuestion(question)
     const isGraphic = GRAPHIC.test(question || '') || (noText && (blankOpts(screen.opts) || screen.opts.length === 0))
 
     let v = null
+    tVision = Date.now()
     if (!letter) {
       try {
         v = await readAndAnswer(shot, { token, fs, multi, graphic: isGraphic })
@@ -284,7 +354,7 @@ async function tick (p) {
     } else if (v) {
       question = v.question
       opts = v.options
-      fromBank = tryBank(question, opts)
+      fromBank = await tryBank(question, opts, cKey)
       if (fromBank) {
         letter = fromBank.answer
         conf = 'high'
@@ -304,7 +374,7 @@ async function tick (p) {
           JSON.stringify({ question, options: opts, answer: letter, how: 'vision' }))
       } catch {}
     } else {
-      // 视觉也不行，退回 OCR 版面分析
+      // 视觉也不行，才退回多候选 OCR 版面分析（这一步要多花约 1.5 秒，所以放在视觉之后）
       const got = await analyze(shot, screen.opts)
       if (!got || got.weak) {
         const tag = String(Date.now()).slice(-7)
@@ -314,22 +384,34 @@ async function tick (p) {
         return
       }
       question = got.question
+      if (got.prog && got.prog.current && !state.ocrProg) state.ocrProg = got.prog.current
       opts = screen.opts.length >= 3 ? screen.opts : got.options
       log('OCR', got.score, got.how, question.slice(0, 24))
-      fromBank = tryBank(question, opts)
+      fromBank = await tryBank(question, opts, cKey)
       if (fromBank) {
         letter = fromBank.answer
         conf = 'high'
         log('题库', fromBank.match, letter, question.slice(0, 24))
       }
       if (!letter) {
-        const a2 = await answer(sig, question, opts, multi)
+        const a2 = await answer(cKey, question, opts, multi)
         if (a2) { letter = a2.letter; conf = a2.confidence }
       }
     }
   }
 
-  if (!letter) { log('没拿到答案', sig.slice(0, 6)); return }
+  // 答不出来也要说一声：什么都不弹的话，用户会以为助手卡住了，一直干等。
+  if (!letter) {
+    log('没拿到答案', sig.slice(0, 6))
+    if (sig !== state.shownSig) {
+      const no0 = (screen.prog && screen.prog.current) || state.ocrProg || '?'
+      await p.callTool('notify', { title: `第 ${no0} 题 · 没把握`, text: '这题没答出来，先自己判断' })
+      state.shownSig = sig
+      state.lastAt = Date.now()
+      log('未答', `第 ${no0} 题`, '（已提示用户）')
+    }
+    return
+  }
 
   // 同一道题（题干+选项相同）只答一次，且永远用同一个答案
   if (sig === state.shownSig) return
@@ -338,14 +420,14 @@ async function tick (p) {
   const no = (screen.prog && screen.prog.current) || state.ocrProg || '?'
   const doubt = conf === 'low'
   const title = `第 ${no} 题 · ${fromBank ? '📚 ' : ''}${letter}${doubt ? '?' : ''}`
-  const body = (picked.map((o) => o.text).join('；') || graphicReason || '').slice(0, 60)
+  const body = Array.from(picked.map((o) => o.text).join('；') || graphicReason || '').slice(0, 60).join('')
   const text = fromBank ? `题库：${body}` : doubt ? `存疑：${body}` : body
   await p.callTool('notify', { title, text })
   state.shownSig = sig
   state.lastApp = screen.app
   state.lastAt = Date.now()
   log('作答', title, body, '|', question.slice(0, 30), doubt ? '| 存疑' : fromBank ? '| 题库' : '',
-    '| ' + (Date.now() - t0) + 'ms')
+    '| ' + (Date.now() - t0) + 'ms', '| ocr ' + ocrMs + ' vision ' + (Date.now() - tVision) + 'ms')
 }
 
 const MULTI = /多选题/
@@ -359,6 +441,7 @@ log('题库', bank ? bank.size + ' 题' : '未加载（放 bank.json 到目录�
 const isConnError = (msg) => /closed|ECONNREFUSED|EPIPE|ECONNRESET|ENOENT/i.test(String(msg))
 
 let p = null
+let pc = null
 let restarts = 0
 let backoff = 1000
 
@@ -367,6 +450,7 @@ for (;;) {
     if (!p) {
       p = await connect()
       await p.init()
+      pc = p
       log(restarts === 0 ? '已连接桥接' : `已重连桥接 #${restarts}`)
       backoff = 1000
     }
@@ -384,5 +468,5 @@ for (;;) {
     }
   }
   // 在答题页上把轮询压到 350ms（切题能更快被发现）；其他时候保持 900ms 省电
-  await new Promise((res) => setTimeout(res, state.examSeen ? 350 : 900))
+  await new Promise((res) => setTimeout(res, state.fault ? 3000 : (state.examSeen ? 350 : 900)))
 }
