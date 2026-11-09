@@ -1,7 +1,8 @@
 #!/bin/sh
 # 考试助手 启动/停止/状态。用 pid 文件保证只有一份在跑。
 DIR=$(cd "$(dirname "$0")" && pwd)
-PIDFILE=$DIR/watcher.pid
+# 和 watch.mjs 用同一个锁文件；放在部署目录外，升级改名也不会丢。
+PIDFILE=${DSH_EXAM_LOCK:-$HOME/.dsh/exam-helper-watch.pid}
 cd "$DIR" || exit 1
 
 alive() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
