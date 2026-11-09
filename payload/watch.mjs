@@ -12,14 +12,16 @@ import { fileURLToPath } from 'node:url'
 import os from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { connect } from './phone.mjs'
-import { parseScreen, signature, looksLikeQuestion } from './lib/parse.mjs'
+import { parseScreen, signature, looksLikeQuestion, classifyScreenError } from './lib/parse.mjs'
 import { createAnswerer } from './lib/model.mjs'
 import { analyze, analyzeFast } from './lib/pipeline.mjs'
 import { readAndAnswer } from './lib/vision.mjs'
 import { loadBank, norm } from './lib/bank.mjs'
 
 const DIR = path.dirname(fileURLToPath(import.meta.url))
-const LOCK = DIR + '/watcher.pid'
+// 锁必须放在部署目录之外：升级时整目录会被改名，目录内的 pid 文件会跟着走，
+// 新进程看不到旧进程，就会出现两个 watcher 同时抢屏、同一题弹两遍。
+const LOCK = process.env.DSH_EXAM_LOCK || path.join(os.homedir(), '.dsh', 'exam-helper-watch.pid')
 const LOG = DIR + '/watch.log'
 const MIN_STABLE = 2
 let bank = loadBank(DIR) // 有 bank.json 就先查表；文件换了会自动重载
@@ -178,7 +180,7 @@ process.on('SIGINT', () => { releaseLock(); process.exit(0) })
 const answer = createAnswerer({ token, cacheFile: DIR + '/answers.json', log })
 
 // done: 已答题 → 最后一次弹通知的时间（毫秒）
-const state = { examSeen: false, sig: '', stable: 0, screen: null, attempts: new Map(), lastRejected: '', lastApp: '', lastAt: 0, ocrProg: 0, shownSig: '', faultNotified: false, faultTimes: [] }
+const state = { examSeen: false, sig: '', stable: 0, screen: null, attempts: new Map(), lastRejected: '', lastApp: '', lastAt: 0, ocrProg: 0, shownSig: '', faultNotified: false, faultTimes: [], lastExamAt: 0, secure: false, secureSince: 0, secureNotified: false, shownAt: 0, hbAt: 0 }
 
 async function shoot (p) {
   const r = await withTimeout(p.callTool('screen', { image: true }), 8000, '截图')
@@ -221,7 +223,48 @@ async function tick (p) {
   const dump = r.text || ''
   // 手机操控会话被系统断掉（息屏、切后台、用户点了停）时，桥接返回 isError 而不是抛错，
   // 这时候要明确告诉用户，否则看起来就是"不动了"。
-  if ((r.raw && r.raw.isError) || /已停止本次手机操作|屏幕关闭|没有权限|not allowed/i.test(dump)) {
+  // FLAG_SECURE / 安全窗口：这一屏系统禁止读取（银行、密码、考试系统的防截屏页），
+  // 但手机操控会话还活着、小圆球也还在 —— 不能当"读屏停了"去打扰用户。
+  // DSH 自己的界面直接在 App 内读，不走桥接；桥接拒绝时返回的也是短文本，
+  // 先认出"这是 DSH"，不要误判成安全窗口。
+  if (/· DSH Go ·/.test(dump) && dump.length > 400) {
+    clearReadFault()
+    state.secure = false
+    state.sig = ''
+    state.stable = 0
+    return
+  }
+  const errKind = classifyScreenError(dump)
+  if (errKind === 'secure') {
+    // 这一屏系统禁止读取（银行/密码/防截屏页），但手机操控会话还在，小圆球也还在 —— 跳过即可，别报警。
+    if (state.secure !== true) {
+      state.secure = true
+      state.secureSince = Date.now()
+      state.secureNotified = false
+      log('安全页面，暂时跳过', String(dump).replace(/\s+/g, ' ').slice(0, 40))
+    }
+    // 考试中途遇到防截屏页：静止 3 秒后提示一次，让用户知道是页面不让读，而不是插件坏了。
+    // 只在最近 10 分钟内读过题时才提示，避免平时刷银行 App 也被打扰。
+    const examRecently = state.lastExamAt && Date.now() - state.lastExamAt < 10 * 60 * 1000
+    if (!state.secureNotified && examRecently && Date.now() - state.secureSince > 3000) {
+      state.secureNotified = true
+      log('安全窗口提示已发')
+      try {
+        await pc.callTool('notify', {
+          title: '答题助手：这页禁止读取',
+          text: '这一页有防截屏保护，我看不到题目。换网页版，或把题干复制给我。',
+        })
+      } catch (e) { log('提示发送失败', e.message) }
+    }
+    clearReadFault()
+    state.sig = ''
+    state.stable = 0
+    return
+  }
+  state.secure = false
+  state.secureSince = 0
+  state.secureNotified = false
+  if (errKind === 'session' || errKind === 'permission' || (r.raw && r.raw.isError)) {
     noteReadFault(dump)
     return
   }
@@ -235,7 +278,8 @@ async function tick (p) {
   if (!screen.isQuestion && screen.app && screen.app === state.lastApp && Date.now() - state.lastAt < 5 * 60_000) {
     const shot = await shoot(p)
     const got = shot ? await analyze(shot, []) : null
-    if (got && !got.weak && got.question.length >= 8 && got.options.length >= 3) {
+    const judgeScreen = /判断题/.test(dump)
+    if (got && !got.weak && got.question.length >= 8 && got.options.length >= (judgeScreen ? 2 : 3)) {
       screen = { ...screen, isQuestion: true, question: got.question, opts: got.options }
       log('OCR 兜底', got.how, got.question.slice(0, 24))
     }
@@ -253,10 +297,21 @@ async function tick (p) {
     (!!screen.prog || NAV.test(dump) || /[？?]\s*$/.test(screen.question || ''))
   const multi = MULTI.test(dump)   // 多选题：模型要给出多个字母
   state.examSeen = examish
+  if (examish) state.lastExamAt = Date.now()
   if (!examish) {
     state.sig = ''
     state.stable = 0
     return
+  }
+
+  // 每 20 秒留一条心跳：不管认没认成题目页都记一笔，出问题时能看出它到底看到了什么
+  if (Date.now() - (state.hbAt || 0) > 20000) {
+    state.hbAt = Date.now()
+    log('心跳', screen.app || '?',
+      '题目页=' + (screen.isQuestion ? '是' : '否'),
+      '题号=' + (screen.prog ? screen.prog.current : state.ocrProg || '?'),
+      '选项=' + (screen.opts ? screen.opts.length : 0),
+      '题干' + ((screen.question || '').length) + '字')
   }
 
   const sig = screen.isQuestion
@@ -275,10 +330,15 @@ async function tick (p) {
   // 没有题号的页面保守一点，等两拍，避免拍到过渡动画。
   if (state.stable < (screen.prog ? 1 : MIN_STABLE)) return
 
-  if (sig === state.shownSig) return      // 还停在同一题上，不重复弹；翻走再翻回来会重新弹
-  const tries = state.attempts.get(sig) || 0
-  if (tries >= 2) return                    // 最多重试两次，避免失败时狂刷
-  state.attempts.set(sig, tries + 1)
+
+  // 还停在同一题上不重复弹；但超过 8 秒又看到同一题，说明中间翻走又回来了（可能没拍到中间那题），要重弹
+  if (sig === state.shownSig && Date.now() - state.shownAt < 8000) return
+  // 同一题最多连续试两次，避免失败时狂刷；但"停下来一段时间再回来看同一题"要重新给机会，
+  // 否则像"选了选项再切回来"这种签名没变的情况会被永久挡住。
+  const att = state.attempts.get(sig)
+  const tries = att && Date.now() - att.at < 10000 ? att.n : 0
+  if (tries >= 2) { state.lastRejected === sig || log('跳过', sig.slice(0, 6), '连续试过' + tries + '次'); state.lastRejected = sig; return }
+  state.attempts.set(sig, { n: tries + 1, at: Date.now() })
 
   let graphicReason = ''
   let question = screen.question
@@ -286,7 +346,7 @@ async function tick (p) {
   let letter = null
   let conf = 'high'
   let ocrMs = 0        // 慢路各阶段耗时，写进日志用
-  let tVision = 0
+  let visionMs = 0
   let tOcr = 0
   let fromBank = null                     // 命中题库时记下来，标题加 📚、正文标「题库：」
 
@@ -342,12 +402,13 @@ async function tick (p) {
     const isGraphic = GRAPHIC.test(question || '') || (noText && (blankOpts(screen.opts) || screen.opts.length === 0))
 
     let v = null
-    tVision = Date.now()
+    const tV = Date.now()
     if (!letter) {
       try {
         v = await readAndAnswer(shot, { token, fs, multi, graphic: isGraphic })
       } catch (e) { log('视觉失败', e.message) }
     }
+    visionMs = Date.now() - tV
 
     if (letter) {
       // 题库已答，不再看视觉结果（也根本没调）
@@ -407,6 +468,7 @@ async function tick (p) {
       const no0 = (screen.prog && screen.prog.current) || state.ocrProg || '?'
       await p.callTool('notify', { title: `第 ${no0} 题 · 没把握`, text: '这题没答出来，先自己判断' })
       state.shownSig = sig
+      state.shownAt = Date.now()
       state.lastAt = Date.now()
       log('未答', `第 ${no0} 题`, '（已提示用户）')
     }
@@ -424,10 +486,11 @@ async function tick (p) {
   const text = fromBank ? `题库：${body}` : doubt ? `存疑：${body}` : body
   await p.callTool('notify', { title, text })
   state.shownSig = sig
+  state.shownAt = Date.now()
   state.lastApp = screen.app
   state.lastAt = Date.now()
   log('作答', title, body, '|', question.slice(0, 30), doubt ? '| 存疑' : fromBank ? '| 题库' : '',
-    '| ' + (Date.now() - t0) + 'ms', '| ocr ' + ocrMs + ' vision ' + (Date.now() - tVision) + 'ms')
+    '| ' + (Date.now() - t0) + 'ms', '| ocr ' + ocrMs + ' vision ' + visionMs + 'ms')
 }
 
 const MULTI = /多选题/
@@ -438,7 +501,7 @@ log('watcher 启动 v4 · pid ' + process.pid)
 log('题库', bank ? bank.size + ' 题' : '未加载（放 bank.json 到目录里即可）')
 
 // 桥接的 socket 名每次引擎启动都会变；连接断了要重读配置重连，否则会变成只刷 ERR 的僵尸进程。
-const isConnError = (msg) => /closed|ECONNREFUSED|EPIPE|ECONNRESET|ENOENT/i.test(String(msg))
+const isConnError = (msg) => /closed|ECONNREFUSED|EPIPE|ECONNRESET|ENOENT|超时|timeout/i.test(String(msg))
 
 let p = null
 let pc = null
@@ -462,6 +525,7 @@ for (;;) {
       try { if (p && p.socket) p.socket.destroy() } catch {}
       p = null
       restarts += 1
+      log('读屏无响应，重连桥接')
       await new Promise((res) => setTimeout(res, backoff))
       backoff = Math.min(backoff * 2, 5000)
       continue
