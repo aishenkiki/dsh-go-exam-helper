@@ -76,15 +76,40 @@ export function options (els) {
   const found = []
   for (const letter of ['A', 'B', 'C', 'D', 'E', 'F']) {
     const last = found.length ? found[found.length - 1].pos : -1
-    const hit = atoms.find((a, i) => a.pos > last && (() => {
+    const after = atoms.filter((a) => a.pos > last)
+    const hit = after.find((a) => {
       const m = a.text.match(CANDIDATE)
       return m && m[1] === letter && m[2].trim().length >= 1
-    })())
-    if (!hit) break
-    const m = hit.text.match(CANDIDATE)
-    found.push({ letter, text: m[2].trim().replace(/\s+/g, ' '), pos: hit.pos })
+    })
+    if (hit) {
+      const m = hit.text.match(CANDIDATE)
+      found.push({ letter, text: m[2].trim().replace(/\s+/g, ' '), pos: hit.pos })
+      continue
+    }
+    // 已经选中的那一项，字母会被 ✓/check_circle 顶掉（"✓在相同的银行风险条件下…check_circle"），
+    // 于是整道题因为少一个字母而认不出来。这里按位置把它补回来。
+    const sel = letter === 'A'
+      ? null
+      : after.find((a) => /check_circle|[✓✔√]/.test(a.text) && !UI_TEXT.test(a.text) && a.text.replace(/check_circle|[✓✔√]/g, '').trim().length >= 1)
+    if (!sel) break
+    found.push({ letter, text: sel.text.replace(/check_circle|[✓✔√]/g, '').trim().replace(/\s+/g, ' '), pos: sel.pos })
   }
-  return found.length >= 3 ? found : []   // 三选项的题也存在
+  return found.length >= 3 ? found : judgeOptions(els)
+}
+
+// 判断题：界面上只有「错误 / 正确」两个圆圈，没有 A-F 字母，按出现顺序配成 A/B。
+const JUDGE_TEXT = /^(正确|错误|对|错|是|否|√|×|✔|✘|☑|☒)$/
+function judgeOptions (els) {
+  const pair = []
+  for (let i = 0; i < els.length && pair.length < 2; i++) {
+    const raw = String(els[i].text || '').trim().replace(/\s+/g, '')
+    if (!JUDGE_TEXT.test(raw)) continue
+    const text = /正确|对|是|√|✔|☑/.test(raw) ? '正确' : '错误'
+    if (pair.some((x) => x.text === text)) continue
+    pair.push({ text, pos: i })
+  }
+  if (pair.length !== 2) return []
+  return pair.map((x, i) => ({ letter: i ? 'B' : 'A', text: x.text, pos: x.pos }))
 }
 
 // 题干候选的最低要求：有实义汉字、不像界面文字。宁可返回空让上层去 OCR，也不能把 UI 文字当题干。
@@ -92,9 +117,15 @@ const UI_TEXT = /显示答案|备注|单选题|多选题|判断题|做对|做错
 export function looksLikeQuestion (t) {
   const s = String(t || '').trim()
   if (s.length < 8) return false
-  if (UI_TEXT.test(s)) return false
-  if (/^\[/.test(s)) return false
-  const cjk = (s.match(/[\u4e00-\u9fa5]/g) || []).length
+  // 「第9题(判断题)、…」把题型写进了题干，剥掉题型词再判断界面文字
+  const core = s.replace(/单选题|多选题|判断题/g, '')
+  if (UI_TEXT.test(core)) return false
+  if (/^\[/.test(core)) return false
+  // 无障碍会把「进度 6 / 2323」「radio_button_checked」「…截断」也算成文本，这些不是题干
+  if (/\b\d{1,4}\s*\/\s*\d{3,5}\b/.test(core)) return false
+  if (/[a-z]+_[a-z_]+/.test(core)) return false
+  if (/[·…]\s*$/.test(core)) return false
+  const cjk = (core.match(/[\u4e00-\u9fa5]/g) || []).length
   return cjk >= 4
 }
 
@@ -120,7 +151,8 @@ export function parseScreen (dump) {
   const prog = progress(els)
   const q = question(els, opts)
   const nav = /下一题|上一题/.test(dump)
-  const isQuestion = opts.length >= 3 && Boolean(q || nav)
+  const judge = /判断题/.test(dump)
+  const isQuestion = (opts.length >= 3 || (judge && opts.length === 2)) && Boolean(q || nav)
   return { app, els, opts, prog, question: q, isQuestion }
 }
 
@@ -131,4 +163,24 @@ export function signature (screen) {
   else parts.push(screen.question.replace(/[^\p{L}\p{N}]/gu, ''))
   parts.push(screen.opts.map((o) => o.letter + o.text).join('|'))
   return parts.join('\n')
+}
+
+/**
+ * 桥接读屏返回的是错误文本时，判断它属于哪一类：
+ * - 'secure'：安全窗口 / FLAG_SECURE（银行、密码、防截屏页）——会话还活着，只是这一屏不让读
+ * - 'session'：手机操控会话被停（息屏、切后台、用户点了停）
+ * - 'permission'：没有无障碍/读屏权限
+ * - null：不是错误
+ */
+export function classifyScreenError (text) {
+  const t = String(text || '')
+  if (!t) return null
+  // 真正的安全窗口回复很短（"屏幕 s5841\n安全窗口（禁止截屏 / 读取）。"）；
+  // 整屏无障碍树里出现"安全窗口"多半是用户聊天/页面里恰好提到这几个字，不能当依据。
+  const short = t.length < 400
+  if (short && /安全窗口|禁止截屏|禁止读取|secure window|FLAG_SECURE/i.test(t)) return 'secure'
+  if (/已停止本次手机操作|屏幕关闭|手机操控.{0,6}(已)?(停止|断开)/.test(t)) return 'session'
+  if (/没有权限|无权限|not allowed|permission/i.test(t)) return 'permission'
+  if (short && /没有读取这个屏幕的内容/.test(t)) return 'secure' // 旧版桥接对安全窗口的说法
+  return null
 }
