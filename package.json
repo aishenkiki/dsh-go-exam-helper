@@ -1,6 +1,6 @@
 {
   "name": "dsh-go-exam-helper",
-  "version": "1.5.4",
+  "version": "1.5.5",
   "description": "DSH Go 答题助手：盯住考试页面，把答案弹在顶部通知里。题库可选，图形题走视觉。",
   "keywords": [
     "dsh",
