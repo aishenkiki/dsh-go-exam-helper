@@ -174,8 +174,15 @@ if (!token) {
 
 takeLock()
 process.on('exit', releaseLock)
-process.on('SIGTERM', () => { releaseLock(); process.exit(0) })
-process.on('SIGINT', () => { releaseLock(); process.exit(0) })
+// 退出时先把桥接连接关掉：App 靠连接断开判断任务结束，
+// 直接 process.exit 会留下"任务还在跑"的悬浮条（实测胶囊会一直显示「正在看屏幕」）。
+const shutdown = () => {
+  releaseLock()
+  try { if (pc && typeof pc.close === 'function') pc.close() } catch {}
+  setTimeout(() => process.exit(0), 80)
+}
+process.on('SIGTERM', shutdown)
+process.on('SIGINT', shutdown)
 
 const answer = createAnswerer({ token, cacheFile: DIR + '/answers.json', log })
 
@@ -531,7 +538,6 @@ for (;;) {
       continue
     }
   }
-  // 每次读屏都会让系统/App 弹一次「正在看屏幕」的提示，轮询太快就会一直闪。
-  // 答题页 700ms、其他页面 1200ms；读屏中断时没必要高频重试，15 秒一次即可。
-  await new Promise((res) => setTimeout(res, state.fault ? 15000 : (state.examSeen ? 700 : 1200)))
+  // 在答题页上把轮询压到 350ms（切题能更快被发现）；其他时候保持 900ms 省电
+  await new Promise((res) => setTimeout(res, state.fault ? 3000 : (state.examSeen ? 350 : 900)))
 }
