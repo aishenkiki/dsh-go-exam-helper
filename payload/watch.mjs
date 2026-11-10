@@ -531,6 +531,7 @@ for (;;) {
       continue
     }
   }
-  // 在答题页上把轮询压到 350ms（切题能更快被发现）；其他时候保持 900ms 省电
-  await new Promise((res) => setTimeout(res, state.fault ? 3000 : (state.examSeen ? 350 : 900)))
+  // 每次读屏都会让系统/App 弹一次「正在看屏幕」的提示，轮询太快就会一直闪。
+  // 答题页 700ms、其他页面 1200ms；读屏中断时没必要高频重试，15 秒一次即可。
+  await new Promise((res) => setTimeout(res, state.fault ? 15000 : (state.examSeen ? 700 : 1200)))
 }
