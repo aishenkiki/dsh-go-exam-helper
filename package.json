@@ -1,6 +1,6 @@
 {
   "name": "dsh-go-exam-helper",
-  "version": "1.5.7",
+  "version": "1.5.8",
   "description": "DSH Go 答题助手：盯住考试页面，把答案弹在顶部通知里。题库可选，图形题走视觉。",
   "keywords": [
     "dsh",
@@ -58,14 +58,14 @@
           ]
         }
       ],
-      "composer.strip": [
+      "composer.tools": [
         {
-          "id": "exam-strip",
-          "icon": "book",
-          "text": {
-            "zh": "答题助手 · 未开始",
-            "en": "Exam · idle"
+          "id": "exam-open",
+          "label": {
+            "zh": "答题助手",
+            "en": "Exam"
           },
+          "icon": "book",
           "panel": "exam"
         }
       ]
