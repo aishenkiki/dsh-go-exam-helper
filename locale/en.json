@@ -1,1 +1,6 @@
-{ "meta": { "title": "Exam helper", "description": "Shows the invigilation status in the Web UI and starts or stops the helper." } }
+{
+  "meta": {
+    "title": "Exam helper",
+    "description": "Watches the quiz page and pops each answer as a heads-up notification — local bank first, model fallback. One package for both the DSH Go native app and the DSH Web UI, where you can import a bank from a local file."
+  }
+}
