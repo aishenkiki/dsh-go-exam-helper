@@ -199,6 +199,10 @@ function questionNo (screen) {
   const cur = (screen.prog && screen.prog.current) || state.ocrProg || 0
   if (cur) { lastNo = cur; lastQKey = key; return cur }
   if (key && key === lastQKey) return lastNo
+  // 题号那一行被滚出屏幕、但选项和上一题一模一样：还是同一道题，沿用上次的题号。
+  const now = (screen.opts || []).map((o) => String(o.text || '').replace(/\s+/g, ''))
+  const prev = state.lastOptsTexts || []
+  if (now.length && now.length === prev.length && now.every((t, i) => t === prev[i])) return lastNo
   return '?'
 }
 
