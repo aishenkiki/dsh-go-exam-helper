@@ -338,7 +338,15 @@ async function tick (p) {
   const optsKey = screen.opts.length
     ? screen.opts.map((o) => o.letter + ':' + String(o.text || '').replace(/\s+/g, '')).join('|')
     : ''
-  const scrollSame = !!optsKey && optsKey === state.lastOptsKey && Date.now() - (state.lastNotifyAt || 0) < 30_000
+  const normOpt = (t) => String(t || '').replace(/\s+/g, '')
+  const nowTexts = screen.opts.map((o) => normOpt(o.text))
+  const prevTexts = state.lastOptsTexts || []
+  // 选项被「补全」了：上滑前只露出 3 个，上滑后第 4、5 个出来——
+  // 这时答案可能变，必须重新判断，不能当成同一屏跳过。
+  const optsGrew = prevTexts.length > 0 && nowTexts.length > prevTexts.length &&
+    prevTexts.every((t, i) => t === nowTexts[i]) && Date.now() - (state.lastNotifyAt || 0) < 90_000
+  if (optsGrew) screen = { ...screen, optsGrew: true }
+  const scrollSame = !optsGrew && !!optsKey && optsKey === state.lastOptsKey && Date.now() - (state.lastNotifyAt || 0) < 30_000
   if (scrollSame) {
     screen = { ...screen, noOverride: state.lastNo }
     state.sig = 'scroll:' + optsKey
@@ -536,10 +544,20 @@ async function tick (p) {
   const title = `第 ${no} 题 · ${fromBank ? '📚 ' : ''}${letter}${doubt ? '?' : ''}`
   const body = Array.from(picked.map((o) => o.text).join('；') || graphicReason || '').slice(0, 60).join('')
   const text = fromBank ? `题库：${body}` : doubt ? `存疑：${body}` : body
+  if (screen.optsGrew && letter === state.lastLetter) {
+    state.shownSig = sig
+    state.lastOptsKey = optsKey
+    state.lastOptsTexts = nowTexts
+    state.lastNotifyAt = Date.now()
+    log('跳过', '补全选项后答案未变', letter)
+    return
+  }
   await p.callTool('notify', { title, text })
   state.shownSig = sig
   state.shownAt = Date.now()
   state.lastOptsKey = optsKey
+  state.lastOptsTexts = nowTexts
+  state.lastLetter = letter
   state.lastNotifyAt = Date.now()
   state.lastNo = no
   state.lastApp = screen.app
