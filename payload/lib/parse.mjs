@@ -44,7 +44,10 @@ export function appName (dump) {
 /** 「进度 4 / 7」这类题号；没有就返回 null。 */
 export function progress (els) {
   for (const e of els) {
-    const m = e.text.match(/(\d{1,4})\s*\/\s*(\d{1,5})/)
+    // 1.4.0 起这一行会被拼成「7 · / · 2323 · 单选题 …」，点号会把 N/M 隔断，
+    // 所以先把中间点归一成空格再匹配。
+    const flat = e.text.replace(/\s*[·•‧・]\s*/g, ' ')
+    const m = flat.match(/(\d{1,4})\s*\/\s*(\d{1,5})/)
     if (!m) continue
     const strong = e.role === '进度' || /^\s*\d+\s*\/\s*\d+\s*$/.test(e.text)
     // 滚动之后这一行常被合成「2 / 2323 · 单选题 · …」，不再是独立的数字元素，
