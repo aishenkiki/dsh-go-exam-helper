@@ -187,6 +187,20 @@ process.on('SIGINT', shutdown)
 const answer = createAnswerer({ token, cacheFile: DIR + '/answers.json', log })
 
 // done: 已答题 → 最后一次弹通知的时间（毫秒）
+// 题号：优先用无障碍的进度，其次用 OCR 读到的进度；都没有时，
+// 如果这一屏的题干和上一题一样（用户只是上下滑了滑），就沿用上次的题号，
+// 免得出现「明明在第 1 题却显示 ? 」。
+let lastQKey = ''
+let lastNo = '?'
+const qKey = (t) => String(t || '').replace(/\s+/g, '')
+function questionNo (screen) {
+  const key = qKey(screen.question)
+  const cur = (screen.prog && screen.prog.current) || state.ocrProg || 0
+  if (cur) { lastNo = cur; lastQKey = key; return cur }
+  if (key && key === lastQKey) return lastNo
+  return '?'
+}
+
 const state = { examSeen: false, sig: '', stable: 0, screen: null, attempts: new Map(), lastRejected: '', lastApp: '', lastAt: 0, ocrProg: 0, shownSig: '', faultNotified: false, faultTimes: [], lastExamAt: 0, secure: false, secureSince: 0, secureNotified: false, shownAt: 0, hbAt: 0 }
 
 async function shoot (p) {
@@ -282,12 +296,21 @@ async function tick (p) {
 
   // 同一 App 刚才还能认出题、这一屏却认不出（无障碍结构变了/被折叠了）：
   // 给它一次纯 OCR 的机会，避免因为界面结构变化就整段失效。
-  if (!screen.isQuestion && screen.app && screen.app === state.lastApp && Date.now() - state.lastAt < 5 * 60_000) {
+  // 无障碍里认不出题（题干是画布/图片，或「上一题/下一题」被滚出屏幕）时，
+  // 只要屏幕上还看得见选项按钮或题号，就给它一次纯 OCR 的机会。
+  const looksLikeQuiz = screen.opts.length >= 3 || screen.opts.length === 2 || !!screen.prog
+  if (!screen.isQuestion && screen.app && looksLikeQuiz) {
     const shot = await shoot(p)
     const got = shot ? await analyze(shot, []) : null
     const judgeScreen = /判断题/.test(dump)
     if (got && !got.weak && got.question.length >= 8 && got.options.length >= (judgeScreen ? 2 : 3)) {
-      screen = { ...screen, isQuestion: true, question: got.question, opts: got.options }
+      screen = {
+        ...screen,
+        isQuestion: true,
+        question: got.question,
+        opts: got.options.length >= screen.opts.length ? got.options : screen.opts,
+        ocr: true,
+      }
       log('OCR 兜底', got.how, got.question.slice(0, 24))
     }
   }
@@ -300,8 +323,10 @@ async function tick (p) {
     try { fs.writeFileSync(DIR + '/debug-noq.txt', dump) } catch {}
   }
   const NAV = /下一题|上一题|答题卡|单选题|多选题|判断题|提交试卷|交卷/
+  // 四种证据任一成立即认：题号进度 / 考试导航按钮 / 题干是问句 / 这一屏是 OCR 认出来的题。
+  // 最后一条是为了「题目太长把上一题下一题挤出屏幕」的页面——那类页面无障碍里既没有题干也没有导航。
   const examish = screen.isQuestion &&
-    (!!screen.prog || NAV.test(dump) || /[？?]\s*$/.test(screen.question || ''))
+    (!!screen.prog || NAV.test(dump) || /[？?]\s*$/.test(screen.question || '') || !!screen.ocr)
   const multi = MULTI.test(dump)   // 多选题：模型要给出多个字母
   state.examSeen = examish
   if (examish) state.lastExamAt = Date.now()
@@ -472,7 +497,7 @@ async function tick (p) {
   if (!letter) {
     log('没拿到答案', sig.slice(0, 6))
     if (sig !== state.shownSig) {
-      const no0 = (screen.prog && screen.prog.current) || state.ocrProg || '?'
+      const no0 = questionNo(screen)
       await p.callTool('notify', { title: `第 ${no0} 题 · 没把握`, text: '这题没答出来，先自己判断' })
       state.shownSig = sig
       state.shownAt = Date.now()
@@ -486,7 +511,7 @@ async function tick (p) {
   if (sig === state.shownSig) return
 
   const picked = opts.filter((o) => String(letter).includes(o.letter))
-  const no = (screen.prog && screen.prog.current) || state.ocrProg || '?'
+  const no = questionNo(screen)
   const doubt = conf === 'low'
   const title = `第 ${no} 题 · ${fromBank ? '📚 ' : ''}${letter}${doubt ? '?' : ''}`
   const body = Array.from(picked.map((o) => o.text).join('；') || graphicReason || '').slice(0, 60).join('')
