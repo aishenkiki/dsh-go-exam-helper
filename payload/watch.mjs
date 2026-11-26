@@ -328,6 +328,10 @@ async function tick (p) {
   // 最后一条是为了「题目太长把上一题下一题挤出屏幕」的页面——那类页面无障碍里既没有题干也没有导航。
   const examish = screen.isQuestion &&
     (!!screen.prog || NAV.test(dump) || /[？?]\s*$/.test(screen.question || '') || !!screen.ocr)
+  // 诊断：题目页但读不到题号时，把这一屏的无障碍原文留一份，方便查为什么
+  if (examish && !screen.prog && !state.ocrProg) {
+    try { fs.writeFileSync(DIR + '/debug-noprog.txt', dump) } catch {}
+  }
   const multi = MULTI.test(dump)   // 多选题：模型要给出多个字母
 
   // 用户只是上下滑了滑（选项一模一样、且刚弹过）：不重复弹，题号沿用上一次的。
