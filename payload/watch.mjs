@@ -194,6 +194,7 @@ let lastQKey = ''
 let lastNo = '?'
 const qKey = (t) => String(t || '').replace(/\s+/g, '')
 function questionNo (screen) {
+  if (screen && screen.noOverride) return screen.noOverride
   const key = qKey(screen.question)
   const cur = (screen.prog && screen.prog.current) || state.ocrProg || 0
   if (cur) { lastNo = cur; lastQKey = key; return cur }
@@ -328,6 +329,21 @@ async function tick (p) {
   const examish = screen.isQuestion &&
     (!!screen.prog || NAV.test(dump) || /[？?]\s*$/.test(screen.question || '') || !!screen.ocr)
   const multi = MULTI.test(dump)   // 多选题：模型要给出多个字母
+
+  // 用户只是上下滑了滑（选项一模一样、且刚弹过）：不重复弹，题号沿用上一次的。
+  const optsKey = screen.opts.length
+    ? screen.opts.map((o) => o.letter + ':' + String(o.text || '').replace(/\s+/g, '')).join('|')
+    : ''
+  const scrollSame = !!optsKey && optsKey === state.lastOptsKey && Date.now() - (state.lastNotifyAt || 0) < 30_000
+  if (scrollSame) {
+    screen = { ...screen, noOverride: state.lastNo }
+    state.sig = 'scroll:' + optsKey
+    state.stable = 1
+    state.examSeen = true
+    state.lastExamAt = Date.now()
+    return
+  }
+
   state.examSeen = examish
   if (examish) state.lastExamAt = Date.now()
   if (!examish) {
@@ -519,6 +535,9 @@ async function tick (p) {
   await p.callTool('notify', { title, text })
   state.shownSig = sig
   state.shownAt = Date.now()
+  state.lastOptsKey = optsKey
+  state.lastNotifyAt = Date.now()
+  state.lastNo = no
   state.lastApp = screen.app
   state.lastAt = Date.now()
   log('作答', title, body, '|', question.slice(0, 30), doubt ? '| 存疑' : fromBank ? '| 题库' : '',
