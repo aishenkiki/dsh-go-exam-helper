@@ -47,7 +47,10 @@ export function progress (els) {
     const m = e.text.match(/(\d{1,4})\s*\/\s*(\d{1,5})/)
     if (!m) continue
     const strong = e.role === '进度' || /^\s*\d+\s*\/\s*\d+\s*$/.test(e.text)
-    if (strong) return { current: Number(m[1]), total: Number(m[2]) }
+    // 滚动之后这一行常被合成「2 / 2323 · 单选题 · …」，不再是独立的数字元素，
+    // 所以带题型字样的行也算数（只有答题页才会出现「单选题」这种词）。
+    const quizHint = /单选题|多选题|判断题|答题卡|进度/.test(e.text)
+    if (strong || quizHint) return { current: Number(m[1]), total: Number(m[2]) }
   }
   return null
 }
