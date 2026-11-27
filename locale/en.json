@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Exam helper",
-    "description": "Watches the quiz page and pops each answer as a heads-up notification — local bank first, model fallback. One package for both the DSH Go native app and the DSH Web UI, where you can import a bank from a local file."
+    "description": "Watch the quiz screen and push each answer as a top notification; local bank first, model otherwise. Requires an Android phone running DSH Go with the engine on-device and phone control enabled (keep the screen on). iOS and desktop-only dsh web are not supported."
   }
 }
