@@ -1,6 +1,6 @@
 {
   "name": "dsh-go-exam-helper",
-  "version": "1.7.12",
+  "version": "1.7.13",
   "description": "DSH Go 答题助手（安卓）：盯住答题页面，把答案弹成顶部通知；本地题库优先。需要安卓手机 + DSH Go App 与手机操控，iOS/纯网页版不支持。",
   "keywords": [
     "dsh",
@@ -9,7 +9,18 @@
     "dsh-go",
     "exam",
     "ocr",
-    "notification"
+    "notification",
+    "答题",
+    "刷题",
+    "考试",
+    "题库",
+    "答案",
+    "单选",
+    "测验",
+    "监考",
+    "quiz",
+    "test",
+    "question-bank"
   ],
   "license": "MIT",
   "author": "aishenkiki",
